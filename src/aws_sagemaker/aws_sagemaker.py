@@ -1,0 +1,215 @@
+from io import BytesIO
+from typing import ClassVar, List, Mapping, Sequence, Any, Dict, Optional, Union, cast
+
+from typing_extensions import Self
+from PIL import Image
+
+from viam.components.camera import Camera
+from viam.media.video import RawImage, CameraMimeType
+from viam.proto.service.vision import Classification, Detection
+from viam.services.vision import Vision
+from viam.module.types import Reconfigurable
+from viam.module.module import Module
+from viam.proto.app.robot import ServiceConfig
+from viam.proto.common import PointCloudObject, ResourceName, Vector3
+from viam.resource.base import ResourceBase
+from viam.resource.registry import Registry, ResourceCreatorRegistration
+from viam.resource.types import Model, ModelFamily
+from viam.utils import ValueTypes
+
+import boto3
+import json
+
+
+class AWS(Vision, Reconfigurable):
+    """
+    AWS implements a vision service that only supports detections
+    and classifications.
+
+    It inherits from the built-in resource subtype Vision and conforms to the
+    ``Reconfigurable`` protocol, which signifies that this component can be
+    reconfigured. Additionally, it specifies a constructor function
+    ``AWS.new_service`` which confirms to the
+    ``resource.types.ResourceCreator`` type required for all models.
+    """
+
+    # Here is where we define our new model's colon-delimited-triplet
+    # (acme:demo:mybase) acme = namespace, demo = family, mybase = model name.
+    MODEL: ClassVar[Model] = Model(ModelFamily("viam", "vision"), "aws-sagemaker")
+
+    # Put more class variables here if/when we need them
+    def __init__(self, name: str):
+        super().__init__(name=name)
+
+    # Constructor
+    @classmethod
+    def new_service(cls,
+                 config: ServiceConfig,
+                 dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
+        service = cls(config.name)
+        service.reconfigure(config, dependencies)
+        return service
+
+    # Validates JSON Configuration
+    @classmethod
+    def validate_config(cls, config: ServiceConfig):
+        endpoint_name = config.attributes.fields["endpoint_name"].string_value
+        if endpoint_name == "":
+            raise Exception(
+                "An endpoint name is required as an attribute for an AWS vision service.")
+        aws_region = config.attributes.fields["aws_region"].string_value
+        if aws_region == "":
+            raise Exception(
+                "The AWS region is required as an attribute for an AWS vision service.")
+        access_key = config.attributes.fields["access_key"].string_value
+        if access_key == "":
+            raise Exception(
+                "The access key is required as an attribute for an AWS vision service.")
+        secret_key= config.attributes.fields["secret_access_key"].string_value
+        if secret_key == "":
+            raise Exception(
+                "The secret access key is required as an attribute for an AWS vision service.")
+        return 
+
+
+    # Handles attribute reconfiguration
+    def reconfigure(self,
+                    config: ServiceConfig,
+                    dependencies: Mapping[ResourceName, ResourceBase]):
+
+        self.endpoint_name = config.attributes.fields["endpoint_name"].string_value
+        self.aws_region = config.attributes.fields["aws_region"].string_value
+        self.access_key = config.attributes.fields["access_key"].string_value
+        self.secret_key = config.attributes.fields["secret_access_key"].string_value
+
+        # Set up sagemaker client on reconfigure
+        self.client = boto3.client('sagemaker-runtime', region_name=self.aws_region,
+                        aws_access_key_id= self.access_key,
+                         aws_secret_access_key = self.secret_key)
+
+    """
+    Implement the methods the Viam RDK defines for the base API
+    (rdk:component:base)
+    """
+
+    # TODO: Khari, think about if we don't have labels. (Use numbers)
+    # Maybe do somethin like check the out.keys() for certain names and use those (safer)
+    # Need to test with more classification and detection models. 
+    async def get_classifications(self,
+                                 image: Union[Image.Image, RawImage],
+                                 count: int,
+                                 *, 
+                                 extra: Optional[Dict[str, Any]] = None,
+                                 timeout: Optional[float] = None,
+                                 **kwargs) -> List[Classification]:
+        classifications = []
+        if isinstance(image, RawImage):
+            response = self.client.invoke_endpoint(EndpointName=self.endpoint_name, 
+                                                   ContentType= 'application/x-image',
+                                                   Accept='application/json;verbose',
+                                                   Body=image.data)
+        else:
+            stream = BytesIO()
+            image = image.convert("RGB")
+            image.save(stream, "JPEG")
+            response = self.client.invoke_endpoint(EndpointName=self.endpoint_name, 
+                                                   ContentType= 'application/x-image',
+                                                   Accept='application/json;verbose',
+                                                   Body=stream.getvalue())
+            
+        # Either way... 
+        out = json.loads(response['Body'].read())
+        labels = out['labels']
+        probs = out['probabilities']
+        zipped = list(zip(labels, probs)) 
+        res = sorted(zipped, key = lambda x: -x[1]) # zipped in decreasing probability order
+        for i in range(count):
+            classifications.append({"class_name": res[i][0], "confidence": res[i][1]})
+
+        return classifications
+    
+
+    async def get_classifications_from_camera(self, 
+                                              camera_name: str, 
+                                              count: int, 
+                                              *,
+                                              extra: Optional[Dict[str, Any]] = None,
+                                              timeout: Optional[float] = None,
+                                              **kwargs) -> List[Classification]:
+        
+        cam = Camera.from_robot(self.parent, camera_name)
+        img = cam.get_image(CameraMimeType.JPEG)
+        return self.get_classifications(image=img, count=count)
+
+    
+    async def get_detections(self,
+                            image: Union[Image.Image, RawImage],
+                            *,
+                            extra: Optional[Dict[str, Any]] = None,
+                            timeout: Optional[float] = None,
+                            **kwargs) -> List[Detection]:
+        
+        detections = []
+        if isinstance(image, RawImage):
+            width, height = int.from_bytes(self.data[8:16], "big"), int.from_bytes(self.data[16:24], "big")
+            response = self.client.invoke_endpoint(EndpointName=self.endpoint_name, 
+                                                   ContentType= 'application/x-image',
+                                                   Accept='application/json;verbose',
+                                                   Body=image.data)
+        else:
+            width, height = float(image.width), float(image.height)
+            stream = BytesIO()
+            image = image.convert("RGB")
+            image.save(stream, "JPEG")
+            response = self.client.invoke_endpoint(EndpointName=self.endpoint_name, 
+                                                   ContentType= 'application/x-image',
+                                                   Accept='application/json;verbose',
+                                                   Body=stream.getvalue())
+            
+        # Either way... 
+        out = json.loads(response['Body'].read())
+        boxes =  out['normalized_boxes']
+        classes= out['classes']
+        scores = out['scores']
+        labels = out['labels']
+        n = min(len(boxes), len(classes), len(scores))
+        
+        for i in range(n):
+            xmin, xmax = boxes[i][0] * width, boxes[i][2] * width
+            ymin, ymax = boxes[i][1] * height, boxes[i][3] * height
+
+            detections.append({ "confidence": float(scores[i]), "class_name": str(labels[int(classes[i])]), 
+                                         "x_min": int(xmin), "y_min": int(ymin), "x_max": int(xmax), "y_max": int(ymax) })
+
+        return detections
+    
+
+    async def get_detections_from_camera(self,
+                                        camera_name: str,
+                                        *,
+                                        extra: Optional[Dict[str, Any]] = None,
+                                        timeout: Optional[float] = None,
+                                        **kwargs) -> List[Detection]:
+        
+        cam = Camera.from_robot(self.parent, camera_name)
+        img = cam.get_image(CameraMimeType.JPEG)
+        print(type(img))
+        return self.get_detections(image=img)
+    
+    
+    async def get_object_point_clouds(self,
+                                      camera_name: str,
+                                      *,
+                                      extra: Optional[Dict[str, Any]] = None,
+                                      timeout: Optional[float] = None,
+                                      **kwargs) -> List[PointCloudObject]:
+        raise NotImplementedError
+    
+    async def do_command(self,
+                        command: Mapping[str, ValueTypes],
+                        *,
+                        timeout: Optional[float] = None,
+                        **kwargs):
+        raise NotImplementedError
+    
+
