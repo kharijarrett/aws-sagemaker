@@ -34,7 +34,7 @@ class AWS(Vision, Reconfigurable):
     """
 
     # Here is where we define our new model's colon-delimited-triplet
-    # (acme:demo:mybase) acme = namespace, demo = family, mybase = model name.
+    # (acme:demo:mybase) viam = namespace, demo = family, mybase = model name.
     MODEL: ClassVar[Model] = Model(ModelFamily("viam", "vision"), "aws-sagemaker")
 
     # Put more class variables here if/when we need them
@@ -61,26 +61,30 @@ class AWS(Vision, Reconfigurable):
         if aws_region == "":
             raise Exception(
                 "The AWS region is required as an attribute for an AWS vision service.")
-        access_key = config.attributes.fields["access_key"].string_value
-        if access_key == "":
+        access_json = config.attributes.fields["access_json"].string_value
+        if access_json == "":
             raise Exception(
-                "The access key is required as an attribute for an AWS vision service.")
-        secret_key= config.attributes.fields["secret_access_key"].string_value
-        if secret_key == "":
+                "The location of the access JSON file is required as an attribute for an AWS vision service.")
+        if access_json[-5:] != ".json":
             raise Exception(
-                "The secret access key is required as an attribute for an AWS vision service.")
+                "The location of the access JSON must end in '.json'")
+
         return 
 
 
     # Handles attribute reconfiguration
+    # TODO: parse JSON for credentials 
     def reconfigure(self,
                     config: ServiceConfig,
                     dependencies: Mapping[ResourceName, ResourceBase]):
 
         self.endpoint_name = config.attributes.fields["endpoint_name"].string_value
         self.aws_region = config.attributes.fields["aws_region"].string_value
-        self.access_key = config.attributes.fields["access_key"].string_value
-        self.secret_key = config.attributes.fields["secret_access_key"].string_value
+        access_json = config.attributes.fields["access_json"].string_value
+        with open(access_json, 'r') as f:
+            accessStuff = json.load(f)
+            self.access_key = accessStuff['access_key']
+            self.secret_key = accessStuff['secret_access_key']
 
         # Set up sagemaker client on reconfigure
         self.client = boto3.client('sagemaker-runtime', region_name=self.aws_region,
@@ -88,8 +92,8 @@ class AWS(Vision, Reconfigurable):
                          aws_secret_access_key = self.secret_key)
 
     """
-    Implement the methods the Viam RDK defines for the base API
-    (rdk:component:base)
+    Implement the methods the Viam RDK defines for the vision service API
+    (rdk:service:vision)
     """
 
     # TODO: Khari, think about if we don't have labels. (Use numbers)
@@ -193,7 +197,6 @@ class AWS(Vision, Reconfigurable):
         
         cam = Camera.from_robot(self.parent, camera_name)
         img = cam.get_image(CameraMimeType.JPEG)
-        print(type(img))
         return self.get_detections(image=img)
     
     
