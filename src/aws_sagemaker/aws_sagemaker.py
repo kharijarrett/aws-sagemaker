@@ -142,7 +142,7 @@ class AWS(Vision, Reconfigurable):
                                               **kwargs) -> List[Classification]:
         
         cam = Camera.from_robot(self.parent, camera_name)
-        img = cam.get_image(CameraMimeType.JPEG)
+        img = cam.get_image()
         return self.get_classifications(image=img, count=count)
 
     
@@ -196,7 +196,7 @@ class AWS(Vision, Reconfigurable):
                                         **kwargs) -> List[Detection]:
         
         cam = Camera.from_robot(self.parent, camera_name)
-        img = cam.get_image(CameraMimeType.JPEG)
+        img = cam.get_image()
         return self.get_detections(image=img)
     
     
