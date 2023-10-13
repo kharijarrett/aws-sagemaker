@@ -155,7 +155,7 @@ class AWS(Vision, Reconfigurable):
         
         detections = []
         if isinstance(image, RawImage):
-            width, height = int.from_bytes(self.data[8:16], "big"), int.from_bytes(self.data[16:24], "big")
+            width, height = int.from_bytes(image.data[8:16], "big"), int.from_bytes(image.data[16:24], "big")
             response = self.client.invoke_endpoint(EndpointName=self.endpoint_name, 
                                                    ContentType= 'application/x-image',
                                                    Accept='application/json;verbose',
